@@ -1,6 +1,6 @@
 PROJECT         := github.com/chipmk/docker-mac-net-connect
-SETUP_IMAGE     := ghcr.io/chipmk/docker-mac-net-connect/setup
-VERSION         := $(shell git describe --tags)
+SETUP_IMAGE     := quay.io/philbrookes/podman-connect
+VERSION         := best
 LD_FLAGS        := -X ${PROJECT}/version.Version=${VERSION} -X ${PROJECT}/version.SetupImage=${SETUP_IMAGE}
 
 run:: build-docker run-go
@@ -13,7 +13,7 @@ build-go::
 	go build -ldflags "-s -w ${LD_FLAGS}" ${PROJECT}
 
 build-docker::
-	docker build -t ${SETUP_IMAGE}:${VERSION} ./client
+	podman build -t ${SETUP_IMAGE}:${VERSION} ./client
 
 build-push-docker::
-	docker buildx build --platform linux/amd64,linux/arm64 --push -t ${SETUP_IMAGE}:${VERSION} ./client
+	podman buildx build --platform linux/amd64,linux/arm64 --push -t ${SETUP_IMAGE}:${VERSION} ./client

@@ -5,16 +5,19 @@ import (
 	"fmt"
 	"os/exec"
 
-	"github.com/docker/docker/api/types"
+	containerTypes "github.com/containers/common/libnetwork/types"
+	dockerTypes "github.com/docker/docker/api/types"
 )
 
 type NetworkManager struct {
-	DockerNetworks map[string]types.NetworkResource
+	DockerNetworks map[string]dockerTypes.NetworkResource
+	PodmanNetworks map[string]containerTypes.Network
 }
 
 func New() NetworkManager {
 	return NetworkManager{
-		DockerNetworks: map[string]types.NetworkResource{},
+		DockerNetworks: map[string]dockerTypes.NetworkResource{},
+		PodmanNetworks: map[string]containerTypes.Network{},
 	}
 }
 
@@ -38,7 +41,7 @@ func (manager *NetworkManager) SetInterfaceAddress(ip string, peerIp string, ifa
 func (manager *NetworkManager) AddRoute(net string, iface string) (string, string, error) {
 
 	cmd := exec.Command("route", "-q", "-n", "add", "-inet", net, "-interface", iface)
-
+	fmt.Printf("cmd: %v\n", cmd.String())
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -66,7 +69,24 @@ func (manager *NetworkManager) DeleteRoute(net string) (string, string, error) {
 	return stdout.String(), stderr.String(), err
 }
 
-func (manager *NetworkManager) ProcessDockerNetworkCreate(network types.NetworkResource, iface string) {
+func (manager *NetworkManager) ProcessPodmanNetworkCreate(network containerTypes.Network, iface string) {
+	manager.PodmanNetworks[network.ID] = network
+
+	for _, subnet := range network.Subnets {
+		fmt.Printf("network interface: %v\n", network.NetworkInterface)
+		if network.Driver == "bridge" {
+			fmt.Printf("Adding route for %s -> %s (%s)\n", subnet.Subnet, iface, network.Name)
+
+			_, stderr, err := manager.AddRoute(subnet.Subnet.String(), iface)
+
+			if err != nil {
+				fmt.Errorf("Failed to add route: %v. %v\n", err, stderr)
+			}
+		}
+	}
+}
+
+func (manager *NetworkManager) ProcessDockerNetworkCreate(network dockerTypes.NetworkResource, iface string) {
 	manager.DockerNetworks[network.ID] = network
 
 	for _, config := range network.IPAM.Config {
@@ -82,7 +102,7 @@ func (manager *NetworkManager) ProcessDockerNetworkCreate(network types.NetworkR
 	}
 }
 
-func (manager *NetworkManager) ProcessDockerNetworkDestroy(network types.NetworkResource) {
+func (manager *NetworkManager) ProcessDockerNetworkDestroy(network dockerTypes.NetworkResource) {
 	for _, config := range network.IPAM.Config {
 		if network.Scope == "local" {
 			fmt.Printf("Deleting route for %s (%s)\n", config.Subnet, network.Name)
