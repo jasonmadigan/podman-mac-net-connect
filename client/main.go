@@ -19,7 +19,7 @@ const (
 )
 
 func main() {
-	interfaceName := "chip0"
+	interfaceName := "mad0"
 
 	serverPortString := os.Getenv("SERVER_PORT")
 	if serverPortString == "" {
@@ -156,6 +156,9 @@ func main() {
 	})
 	if err != nil {
 		fmt.Printf("Failed to configure wireguard device: %v\n", err)
+		fmt.Printf("%v", interfaceName)
+		fmt.Printf("%v", ips[0])
+		fmt.Printf("done.")
 		os.Exit(ExitSetupFailed)
 	}
 

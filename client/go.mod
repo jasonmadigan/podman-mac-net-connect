@@ -1,4 +1,4 @@
-module github.com/chipmk/docker-mac-net-connect/client
+module github.com/jasonmadigan/podman-mac-net-connect/client
 
 go 1.17
 

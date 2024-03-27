@@ -6,17 +6,14 @@ import (
 	"os/exec"
 
 	containerTypes "github.com/containers/common/libnetwork/types"
-	dockerTypes "github.com/docker/docker/api/types"
 )
 
 type NetworkManager struct {
-	DockerNetworks map[string]dockerTypes.NetworkResource
 	PodmanNetworks map[string]containerTypes.Network
 }
 
 func New() NetworkManager {
 	return NetworkManager{
-		DockerNetworks: map[string]dockerTypes.NetworkResource{},
 		PodmanNetworks: map[string]containerTypes.Network{},
 	}
 }
@@ -84,35 +81,4 @@ func (manager *NetworkManager) ProcessPodmanNetworkCreate(network containerTypes
 			}
 		}
 	}
-}
-
-func (manager *NetworkManager) ProcessDockerNetworkCreate(network dockerTypes.NetworkResource, iface string) {
-	manager.DockerNetworks[network.ID] = network
-
-	for _, config := range network.IPAM.Config {
-		if network.Scope == "local" {
-			fmt.Printf("Adding route for %s -> %s (%s)\n", config.Subnet, iface, network.Name)
-
-			_, stderr, err := manager.AddRoute(config.Subnet, iface)
-
-			if err != nil {
-				fmt.Errorf("Failed to add route: %v. %v\n", err, stderr)
-			}
-		}
-	}
-}
-
-func (manager *NetworkManager) ProcessDockerNetworkDestroy(network dockerTypes.NetworkResource) {
-	for _, config := range network.IPAM.Config {
-		if network.Scope == "local" {
-			fmt.Printf("Deleting route for %s (%s)\n", config.Subnet, network.Name)
-
-			_, stderr, err := manager.DeleteRoute(config.Subnet)
-
-			if err != nil {
-				fmt.Errorf("Failed to delete route: %v. %v\n", err, stderr)
-			}
-		}
-	}
-	delete(manager.DockerNetworks, network.ID)
 }

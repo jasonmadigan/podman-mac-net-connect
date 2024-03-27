@@ -3,22 +3,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/containers/podman/v4/pkg/specgen"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/ipc"
@@ -26,13 +23,14 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
-	"github.com/chipmk/docker-mac-net-connect/networkmanager"
-	"github.com/chipmk/docker-mac-net-connect/version"
+	"github.com/jasonmadigan/podman-mac-net-connect/networkmanager"
+	"github.com/jasonmadigan/podman-mac-net-connect/version"
 
 	"github.com/containers/podman/v4/pkg/bindings"
 	"github.com/containers/podman/v4/pkg/bindings/containers"
 	"github.com/containers/podman/v4/pkg/bindings/images"
 	"github.com/containers/podman/v4/pkg/bindings/network"
+	"github.com/containers/podman/v4/pkg/specgen"
 )
 
 const (
@@ -46,7 +44,86 @@ const (
 	ENV_WG_PROCESS_FOREGROUND = "WG_PROCESS_FOREGROUND"
 )
 
+// SSHConnectionDetails holds the SSH URI and identity file path.
+type SSHConnectionDetails struct {
+	URI      string
+	Identity string
+}
+
+// getSSHConnectionDetails executes "podman system connection list" and returns SSH URI and identity file path.
+func getSSHConnectionDetails() (*SSHConnectionDetails, error) {
+	cmd := exec.Command("podman", "system", "connection", "list")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error executing command: %w", err)
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) > 3 && fields[0] == "podman-machine-default-root" {
+			return &SSHConnectionDetails{
+				URI:      fields[1],
+				Identity: fields[2],
+			}, nil
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error scanning command output: %w", err)
+	}
+
+	return nil, fmt.Errorf("default root connection not found")
+}
+
+// loadWireGuardModule attempts to load the WireGuard module using modprobe.
+// loadWireGuardModule attempts to load the WireGuard module using modprobe.
+func loadWireGuardModule(details *SSHConnectionDetails) error {
+	// Extract the host from the URI
+	uri, err := url.Parse(details.URI)
+	if err != nil {
+		return fmt.Errorf("failed to parse SSH URI: %w", err)
+	}
+
+	// Default SSH port
+	port := "22"
+	if uri.Port() != "" {
+		port = uri.Port()
+	}
+
+	// SSH command to load the WireGuard module
+	sshCommand := "sudo modprobe wireguard"
+
+	// Construct the full SSH command string
+	cmdString := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -p %s %s@%s '%s'", details.Identity, port, uri.User.Username(), uri.Hostname(), sshCommand)
+
+	// Execute the SSH command
+	cmd := exec.Command("sh", "-c", cmdString)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to load WireGuard module: %s: %w", output, err)
+	}
+
+	fmt.Println("WireGuard module loaded successfully.")
+	return nil
+}
+
 func main() {
+	details, err := getSSHConnectionDetails()
+	if err != nil {
+		fmt.Println("Error getting SSH connection details:", err)
+		return
+	}
+
+	fmt.Printf("SSH URI: %s, Identity File: %s\n", details.URI, details.Identity)
+
+	err = loadWireGuardModule(details)
+	if err != nil {
+		fmt.Println("Error loading WireGuard module:", err)
+		return
+	}
+
 	logLevel := func() int {
 		switch os.Getenv("LOG_LEVEL") {
 		case "verbose", "debug":
@@ -59,7 +136,7 @@ func main() {
 		return device.LogLevelVerbose
 	}()
 
-	fmt.Printf("docker-mac-net-connect version '%s'\n", version.Version)
+	fmt.Printf("podman-mac-net-connect version '%s'\n", version.Version)
 
 	tun, err := tun.CreateTUN("utun", device.DefaultMTU)
 	if err != nil {
@@ -178,107 +255,32 @@ func main() {
 
 	logger.Verbosef("Interface %s created\n", interfaceName)
 
-	dockerFound := false
-	podmanFound := false
-
-	podmanCtx, err := bindings.NewConnection(context.Background(), "ssh://root@127.0.0.1:60243/run/podman/podman.sock")
+	podmanCtx, err := bindings.NewConnection(context.Background(), "ssh://root@127.0.0.1:59886/run/podman/podman.sock") // TODO: dynamic `podman system connection list`
 	if err != nil {
 		fmt.Println(err)
-		podmanFound = false
-	} else {
-		fmt.Println("found podman")
-		podmanFound = true
-	}
-
-	dockerCLI, err := client.NewClientWithOpts(client.FromEnv)
-	if err != nil {
-		logger.Errorf("Failed to create Docker client: %v", err)
-		dockerFound = false
-	} else {
-		fmt.Println("found docker")
-		dockerFound = true
 	}
 	logger.Verbosef("Wireguard server listening\n")
 
-	ctx := context.Background()
-
 	go func() {
 		for {
-			if podmanFound {
-				err = setupPodmanVm(podmanCtx, port, hostPeerIp, vmPeerIp, hostPrivateKey, vmPrivateKey)
-				if err != nil {
-					logger.Errorf("Failed to setup VM: %v", err)
-					time.Sleep(5 * time.Second)
-					continue
-				}
-				fmt.Printf("Set up VM\n")
-				networks, err := network.List(podmanCtx, &network.ListOptions{})
-				if err != nil {
-					logger.Errorf("Failed to list podman networks: %w", err)
-					time.Sleep(5 * time.Second)
-					continue
-				}
-				for _, network := range networks {
-					fmt.Printf("network create for %+v", network)
-					networkManager.ProcessPodmanNetworkCreate(network, interfaceName)
-				}
-
+			err = setupPodmanVm(podmanCtx, port, hostPeerIp, vmPeerIp, hostPrivateKey, vmPrivateKey)
+			if err != nil {
+				logger.Errorf("Failed to setup VM: %v", err)
+				time.Sleep(5 * time.Second)
+				continue
 			}
-			if dockerFound {
-				networks, err := dockerCLI.NetworkList(ctx, types.NetworkListOptions{})
-				if err != nil {
-					logger.Errorf("failed to list docker networks: %w", err)
-					time.Sleep(5 * time.Second)
-					continue
-				}
-				for _, network := range networks {
-					fmt.Printf("network create for %+v", network)
-					networkManager.ProcessDockerNetworkCreate(network, interfaceName)
-				}
-
-				logger.Verbosef("Watching Docker events\n")
-
-				msgs, errsChan := dockerCLI.Events(ctx, types.EventsOptions{
-					Filters: filters.NewArgs(
-						filters.Arg("type", "network"),
-						filters.Arg("event", "create"),
-						filters.Arg("event", "destroy"),
-					),
-				})
-
-				for loop := true; loop; {
-					select {
-					case err := <-errsChan:
-						logger.Errorf("Error: %v\n", err)
-						loop = false
-					case msg := <-msgs:
-						// Add routes when new Docker networks are created
-						if msg.Type == "network" && msg.Action == "create" {
-							network, err := dockerCLI.NetworkInspect(ctx, msg.Actor.ID, types.NetworkInspectOptions{})
-							if err != nil {
-								logger.Errorf("Failed to inspect new Docker network: %v", err)
-								continue
-							}
-
-							networkManager.ProcessDockerNetworkCreate(network, interfaceName)
-							continue
-						}
-
-						// Delete routes when Docker networks are destroyed
-						if msg.Type == "network" && msg.Action == "destroy" {
-							network, exists := networkManager.DockerNetworks[msg.Actor.ID]
-							if !exists {
-								logger.Errorf("Unknown Docker network with ID %s. No routes will be removed.")
-								continue
-							}
-
-							networkManager.ProcessDockerNetworkDestroy(network)
-							continue
-						}
-					}
-				}
-
+			fmt.Printf("Set up VM\n")
+			networks, err := network.List(podmanCtx, &network.ListOptions{})
+			if err != nil {
+				logger.Errorf("Failed to list podman networks: %w", err)
+				time.Sleep(5 * time.Second)
+				continue
 			}
+			for _, network := range networks {
+				fmt.Printf("network create for %+v", network)
+				networkManager.ProcessPodmanNetworkCreate(network, interfaceName)
+			}
+
 			time.Sleep(5 * time.Second)
 		}
 	}()
@@ -358,78 +360,6 @@ func setupPodmanVm(
 	if err != nil {
 		return fmt.Errorf("failed to start container: %w", err)
 	}
-
-	fmt.Println("Setup container complete")
-
-	return nil
-}
-
-func setupDockerVm(
-	ctx context.Context,
-	dockerCli *client.Client,
-	serverPort int,
-	hostPeerIp string,
-	vmPeerIp string,
-	hostPrivateKey wgtypes.Key,
-	vmPrivateKey wgtypes.Key,
-) error {
-	imageName := fmt.Sprintf("%s:%s", version.SetupImage, version.Version)
-
-	_, _, err := dockerCli.ImageInspectWithRaw(ctx, imageName)
-	if err != nil {
-		fmt.Printf("Image (%v) doesn't exist locally. Pulling...\n", imageName)
-
-		pullStream, err := dockerCli.ImagePull(ctx, imageName, types.ImagePullOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to pull setup image: %w", err)
-		}
-
-		io.Copy(os.Stdout, pullStream)
-	}
-
-	resp, err := dockerCli.ContainerCreate(ctx, &container.Config{
-		Image: imageName,
-		Env: []string{
-			"SERVER_PORT=" + strconv.Itoa(serverPort),
-			"HOST_PEER_IP=" + hostPeerIp,
-			"VM_PEER_IP=" + vmPeerIp,
-			"HOST_PUBLIC_KEY=" + hostPrivateKey.PublicKey().String(),
-			"VM_PRIVATE_KEY=" + vmPrivateKey.String(),
-		},
-	}, &container.HostConfig{
-		AutoRemove:  true,
-		NetworkMode: "host",
-		CapAdd:      []string{"NET_ADMIN"},
-	}, nil, nil, "wireguard-setup")
-	if err != nil {
-		return fmt.Errorf("failed to create container: %w", err)
-	}
-
-	// Run container to completion
-	err = dockerCli.ContainerStart(ctx, resp.ID, types.ContainerStartOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to start container: %w", err)
-	}
-
-	func() error {
-		reader, err := dockerCli.ContainerLogs(ctx, resp.ID, types.ContainerLogsOptions{
-			ShowStdout: true,
-			ShowStderr: true,
-			Follow:     true,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to get logs for container %s: %w", resp.ID, err)
-		}
-
-		defer reader.Close()
-
-		_, err = stdcopy.StdCopy(os.Stdout, os.Stderr, reader)
-		if err != nil {
-			return err
-		}
-
-		return nil
-	}()
 
 	fmt.Println("Setup container complete")
 

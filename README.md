@@ -1,27 +1,33 @@
-# Docker Mac Net Connect
+# Podman Mac Net Connect
 
-> Connect directly to Docker-for-Mac containers via IP address.
+> **Note:** This project is a fork of [chipmk/docker-mac-net-connect](https://github.com/chipmk/docker-mac-net-connect) for Docker, an excellent tool that inspired this version for Podman.
+
+> Connect directly to [Podman](https://podman.io/) containers on macOS via IP address.
 
 ## Features
 
-- **L3 connectivity:** Connect to Docker containers from macOS host (without port binding).
+- **L3 connectivity:** Connect to podman containers from macOS host (without port binding).
 - **Lightweight:** Based on WireGuard (built-in to Linux kernel).
-- **Hands-off:** Install once and forget. No need to re-configure every time you restart your Mac or Docker daemon.
+- **Hands-off:** Install once and forget. No need to re-configure every time you restart your Mac or podman machines.
 - **Automatic:** Docker networks are automatically added/removed from macOS routing table.
 - **No bloat:** Everything is handled by a single binary. No external dependencies/tools are needed.
 
 ## Requirements
 
-You must be using Docker Desktop v3.6.0 or higher to use this tool (see https://github.com/chipmk/docker-mac-net-connect/issues/10#issuecomment-1146662058).
+You must be using podman for macOS v5.0.0 or higher to use this tool.
+
+## Notes
+
+The `wireguard` kernel module is not enabled in podman machines out of the box. Running this service will see it check for the existence of this module and, if necessary, enable it via via a podman system connection as root. This likely only works on `--rootful` podman machines for the time being.
 
 ## Installation
 
 ```bash
 # Install via Homebrew
-$ brew install chipmk/tap/docker-mac-net-connect
+$ brew install jasonmadigan/tap/podman-mac-net-connect
 
 # Run the service and register it to launch at boot
-$ sudo brew services start chipmk/tap/docker-mac-net-connect
+$ sudo brew services start jasonmadigan/tap/podman-mac-net-connect
 ```
 
 ### `GOPROXY` support
@@ -31,7 +37,7 @@ This Homebrew formulae is built using `go`. When Homebrew installs a formulae, i
 Some users require changing `GOPROXY` due to firewalls. This formulae adds special support for `GOPROXY` using `HOMEBREW_GOPROXY`:
 
 ```bash
-HOMEBREW_GOPROXY=https://my-proxy-url brew install chipmk/tap/docker-mac-net-connect
+HOMEBREW_GOPROXY=https://my-proxy-url brew install jasonmadigan/tap/podman-mac-net-connect
 ```
 
 ## Usage
@@ -40,22 +46,34 @@ After installing, you will be able to do this:
 
 ```bash
 # Run an nginx container
-$ docker run --rm --name nginx -d nginx
+podman run --rm --name nginx -d nginx
+```
 
+```bash
 # Get the internal IP for the container
-$ docker inspect nginx --format '{{.NetworkSettings.IPAddress}}'
-172.17.0.2
+podman inspect nginx --format '{{.NetworkSettings.IPAddress}}'
+```
 
+```bash
+# internal IP for the container
+10.88.0.19
+```
+
+```bash
 # Make an HTTP request directly to its IP
-$ curl -I 172.17.0.2
+curl -I 10.88.0.19
+```
+
+```bash
+# Response
 HTTP/1.1 200 OK
-Server: nginx/1.21.3
-Date: Thu, 11 Nov 2021 21:00:37 GMT
+Server: nginx/1.25.4
+Date: Wed, 27 Mar 2024 08:59:22 GMT
 Content-Type: text/html
 Content-Length: 615
-Last-Modified: Tue, 07 Sep 2021 15:21:03 GMT
+Last-Modified: Wed, 14 Feb 2024 16:03:00 GMT
 Connection: keep-alive
-ETag: "6137835f-267"
+ETag: "65cce434-267"
 Accept-Ranges: bytes
 ```
 
@@ -65,13 +83,13 @@ Accessing containers directly by IP (instead of port binding) can be useful and 
 
 ### Problem
 
-Unlike Docker on Linux, Docker-for-Mac does not expose container networks directly on the macOS host. Docker-for-Mac works by running a Linux VM under the hood (using [`hyperkit`](https://github.com/moby/hyperkit)) and creates containers within that VM.
+Podman on macOS does not expose container networks directly on the macOS host. Podman on macOS works by running a Linux VM under the hood (using [`qemu`](https://www.qemu.org/)) and creates containers within that VM.
 
-Docker-for-Mac supports connecting to containers over Layer 4 (port binding), but not Layer 3 (by IP address).
+Podman on macOS supports connecting to containers over Layer 4 (port binding), but not Layer 3 (by IP address).
 
 ### Solution
 
-Create a minimal network tunnel between macOS and the Docker Desktop Linux VM. The tunnel is implemented using WireGuard.
+Create a minimal network tunnel between macOS and the Linux VM running Podman's containers. The tunnel is implemented using WireGuard.
 
 ### Why WireGuard?
 
@@ -83,7 +101,7 @@ WireGuard is an extremely lightweight and fast VPN. It’s also built in to the 
 
 ### macOS side
 
-A lightweight customized WireGuard server (_`docker-mac-net-connect`_) runs on your macOS host and creates a virtual network interface (`utun`) that acts as the link between your Mac and the Docker Desktop Linux VM.
+A lightweight customized WireGuard server (_`podman-mac-net-connect`_) runs on your macOS host and creates a virtual network interface (`utun`) that acts as the link between your Mac and the Docker Desktop Linux VM.
 
 ### Linux VM side
 
@@ -95,14 +113,14 @@ The container creates the interface, configures WireGuard, then exits and is des
 
 ### Tying it together
 
-The server on macOS monitors your Docker container networks and automatically adds their subnets to your macOS routing table (routing through the `utun` interface). Now you can connect to any container directly by it’s IP address from your macOS host. Eg.
+The server on macOS monitors your podman container networks and automatically adds their subnets to your macOS routing table (routing through the `utun` interface). Now you can connect to any container directly by it’s IP address from your macOS host. Eg.
 
 ```bash
 # Run an nginx container
-$ docker run --rm --name nginx -d nginx
+$ podman run --rm --name nginx -d nginx
 
 # Get the internal IP for the container
-$ docker inspect nginx --format '{{.NetworkSettings.IPAddress}}'
+$ podman inspect nginx --format '{{.NetworkSettings.IPAddress}}'
 172.17.0.2
 
 # Make an HTTP request directly to its IP
@@ -144,31 +162,31 @@ Network traffic runs directly between the macOS host and local Linux VM - no ext
 
 ### Can I use this in production?
 
-This tool was designed to assist with development on macOS. Since Docker-for-Mac isn't designed for production workloads, neither is this.
+This tool was designed to assist with development on macOS, only.
 
-### What happens if Docker Desktop restarts?
+### What happens if a podman machine restarts?
 
-The server detects when the Docker daemon stops and automatically reconfigures the tunnel when it starts back up.
+The server detects when the podman stops and automatically reconfigures the tunnel when it starts back up.
 
-### Do you add/remove routes when Docker networks change?
+### Do you add/remove routes when Podman networks change?
 
-Yes, the server watches the Docker daemon for both network creations and deletions and will add/remove routes accordingly.
+Yes, the server watches the Podman daemon for both network creations and deletions and will add/remove routes accordingly.
 
-For example, let's create a Docker network with subnet `172.200.0.0/16`:
+For example, let's create a Podman network with subnet `172.200.0.0/16`:
 
 ```bash
 # First validate that no route exists for the subnet
 sudo netstat -rnf inet | grep 172.200
 
 # Create the docker network
-$ docker network create --subnet 172.200.0.0/16 my-network
+podman network create --subnet 172.200.0.0/16 my-network
 
 # Check the routing table - a new route exists
-$ sudo netstat -rnf inet | grep 172.200
+sudo netstat -rnf inet | grep 172.200
 172.200            utun0              USc          utun0
 
 # Remove the docker network
-$ docker network rm my-network
+podman network rm my-network
 
 # The route has been removed
 sudo netstat -rnf inet | grep 172.200
