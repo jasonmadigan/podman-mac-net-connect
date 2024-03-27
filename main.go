@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"net"
@@ -11,8 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
+	"path"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +26,7 @@ import (
 	"github.com/jasonmadigan/podman-mac-net-connect/networkmanager"
 	"github.com/jasonmadigan/podman-mac-net-connect/version"
 
+	"github.com/BurntSushi/toml"
 	"github.com/containers/podman/v4/pkg/bindings"
 	"github.com/containers/podman/v4/pkg/bindings/containers"
 	"github.com/containers/podman/v4/pkg/bindings/images"
@@ -44,66 +45,94 @@ const (
 	ENV_WG_PROCESS_FOREGROUND = "WG_PROCESS_FOREGROUND"
 )
 
+type ContainersConfig struct {
+	Engine struct {
+		ServiceDestinations map[string]ServiceDestination `toml:"service_destinations"`
+	} `toml:"engine"`
+}
+
+type ServiceDestination struct {
+	URI      string `toml:"uri"`
+	Identity string `toml:"identity"`
+}
+
+// parseContainersConfig reads and parses containers.conf from the specified user's home directory.
+func parseContainersConfig() (*ContainersConfig, error) {
+	owner, err := getFormulaOwner("/opt/homebrew/Library/Taps/jasonmadigan/homebrew-tap")
+	if err != nil {
+		return nil, fmt.Errorf("error getting formula owner: %w", err)
+	}
+
+	u, err := user.Lookup(owner)
+	if err != nil {
+		return nil, fmt.Errorf("error looking up user: %w", err)
+	}
+	configPath := path.Join(u.HomeDir, ".config", "containers", "containers.conf")
+
+	var config ContainersConfig
+	if _, err := toml.DecodeFile(configPath, &config); err != nil {
+		return nil, fmt.Errorf("error parsing containers.conf: %w", err)
+	}
+
+	return &config, nil
+}
+
 // SSHConnectionDetails holds the SSH URI and identity file path.
 type SSHConnectionDetails struct {
 	URI      string
 	Identity string
 }
 
-// getSSHConnectionDetails executes "podman system connection list" and returns SSH URI and identity file path.
-func getSSHConnectionDetails() (*SSHConnectionDetails, error) {
-	cmd := exec.Command("/opt/podman/bin/podman", "system", "connection", "list")
-	output, err := cmd.Output()
+func getFormulaOwner(formulaPath string) (string, error) {
+	fileInfo, err := os.Stat(formulaPath)
 	if err != nil {
-		fmt.Printf("Command execution failed: %v\nOutput: %s\n", err, string(output))
-		return nil, fmt.Errorf("error executing command: %w", err)
+		return "", err
 	}
 
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		line := scanner.Text()
-		fields := strings.Fields(line)
-		if len(fields) > 3 && fields[0] == "podman-machine-default-root" {
-			return &SSHConnectionDetails{
-				URI:      fields[1],
-				Identity: fields[2],
-			}, nil
-		}
+	stat, ok := fileInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("failed to get stat")
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error scanning command output: %w", err)
+	uid := stat.Uid
+	user, err := user.LookupId(fmt.Sprintf("%d", uid))
+	if err != nil {
+		return "", err
 	}
 
-	return nil, fmt.Errorf("default root connection not found")
+	return user.Username, nil
 }
 
 // loadWireGuardModule attempts to load the WireGuard module using modprobe.
-// loadWireGuardModule attempts to load the WireGuard module using modprobe.
-func loadWireGuardModule(details *SSHConnectionDetails) error {
+func loadWireGuardModule(details *SSHConnectionDetails, username string) error {
 	// Extract the host from the URI
 	uri, err := url.Parse(details.URI)
 	if err != nil {
 		return fmt.Errorf("failed to parse SSH URI: %w", err)
 	}
 
-	// Default SSH port
-	port := "22"
+	port := "22" // Default SSH port
 	if uri.Port() != "" {
 		port = uri.Port()
 	}
 
-	// SSH command to load the WireGuard module
-	sshCommand := "sudo modprobe wireguard"
+	// Prepare the SSH command
+	sshCommand := fmt.Sprintf("sudo -u %s ssh -i %s -o StrictHostKeyChecking=no -p %s %s@%s 'sudo modprobe wireguard'",
+		username, details.Identity, port, uri.User.Username(), uri.Hostname())
 
-	// Construct the full SSH command string
-	cmdString := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -p %s %s@%s '%s'", details.Identity, port, uri.User.Username(), uri.Hostname(), sshCommand)
+	// Log the exact SSH command being executed for debugging
+	fmt.Printf("Executing SSH command: %s\n", sshCommand)
 
 	// Execute the SSH command
-	cmd := exec.Command("sh", "-c", cmdString)
+	cmd := exec.Command("sh", "-c", sshCommand)
 	output, err := cmd.CombinedOutput()
+
+	// Log the output from executing the SSH command
+	fmt.Printf("SSH command output: %s\n", string(output))
+
 	if err != nil {
-		return fmt.Errorf("failed to load WireGuard module: %s: %w", output, err)
+		// Provide detailed error information
+		return fmt.Errorf("failed to load WireGuard module via SSH: %s: %w", output, err)
 	}
 
 	fmt.Println("WireGuard module loaded successfully.")
@@ -111,18 +140,36 @@ func loadWireGuardModule(details *SSHConnectionDetails) error {
 }
 
 func main() {
-	details, err := getSSHConnectionDetails()
+	// Parsing containers.conf for SSH details
+	config, err := parseContainersConfig()
 	if err != nil {
-		fmt.Println("Error getting SSH connection details:", err)
-		return
+		fmt.Printf("Error parsing containers.conf: %v\n", err)
+		os.Exit(ExitSetupFailed)
 	}
 
-	fmt.Printf("SSH URI: %s, Identity File: %s\n", details.URI, details.Identity)
-
-	err = loadWireGuardModule(details)
+	owner, err := getFormulaOwner("/opt/homebrew/Library/Taps/jasonmadigan/homebrew-tap")
 	if err != nil {
-		fmt.Println("Error loading WireGuard module:", err)
-		return
+		fmt.Println("Failed to get formula owner:", err)
+		os.Exit(ExitSetupFailed)
+	}
+
+	destination, ok := config.Engine.ServiceDestinations["podman-machine-default-root"]
+	if !ok || destination.URI == "" || destination.Identity == "" {
+		fmt.Println("SSH details for 'podman-machine-default-root' not found in containers.conf")
+		os.Exit(ExitSetupFailed)
+	}
+
+	sshDetails := SSHConnectionDetails{
+		URI:      destination.URI,
+		Identity: destination.Identity,
+	}
+
+	fmt.Printf("SSH URI: %s, Identity File: %s\n", sshDetails.URI, sshDetails.Identity)
+
+	// Proceeding with WireGuard module loading and further setup
+	if err := loadWireGuardModule(&sshDetails, owner); err != nil {
+		fmt.Printf("Error loading WireGuard module: %v\n", err)
+		os.Exit(ExitSetupFailed)
 	}
 
 	logLevel := func() int {
@@ -256,10 +303,13 @@ func main() {
 	logger.Verbosef("Interface %s created\n", interfaceName)
 	logger.Verbosef("Wireguard server listening\n")
 
-	podmanCtx, err := bindings.NewConnection(context.Background(), details.URI)
+	fmt.Printf("Attempting to create Podman connection with URI: %s and Identity: %s\n", sshDetails.URI, sshDetails.Identity)
+	podmanCtx, err := bindings.NewConnectionWithIdentity(context.Background(), sshDetails.URI, sshDetails.Identity, false)
 	if err != nil {
-		fmt.Println("Error creating Podman connection:", err)
+		fmt.Printf("Error creating Podman connection with identity: %v\n", err)
 		return
+	} else {
+		fmt.Println("Successfully created Podman connection with identity.")
 	}
 
 	go func() {
