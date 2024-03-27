@@ -55,6 +55,7 @@ func getSSHConnectionDetails() (*SSHConnectionDetails, error) {
 	cmd := exec.Command("/opt/podman/bin/podman", "system", "connection", "list")
 	output, err := cmd.Output()
 	if err != nil {
+		fmt.Printf("Command execution failed: %v\nOutput: %s\n", err, string(output))
 		return nil, fmt.Errorf("error executing command: %w", err)
 	}
 
