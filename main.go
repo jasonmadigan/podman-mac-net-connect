@@ -254,12 +254,13 @@ func main() {
 	}
 
 	logger.Verbosef("Interface %s created\n", interfaceName)
-
-	podmanCtx, err := bindings.NewConnection(context.Background(), "ssh://root@127.0.0.1:59886/run/podman/podman.sock") // TODO: dynamic `podman system connection list`
-	if err != nil {
-		fmt.Println(err)
-	}
 	logger.Verbosef("Wireguard server listening\n")
+
+	podmanCtx, err := bindings.NewConnection(context.Background(), details.URI)
+	if err != nil {
+		fmt.Println("Error creating Podman connection:", err)
+		return
+	}
 
 	go func() {
 		for {
