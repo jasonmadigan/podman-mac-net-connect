@@ -52,7 +52,7 @@ type SSHConnectionDetails struct {
 
 // getSSHConnectionDetails executes "podman system connection list" and returns SSH URI and identity file path.
 func getSSHConnectionDetails() (*SSHConnectionDetails, error) {
-	cmd := exec.Command("podman", "system", "connection", "list")
+	cmd := exec.Command("/opt/podman/bin/podman", "system", "connection", "list")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("error executing command: %w", err)
@@ -140,7 +140,6 @@ func main() {
 
 	tun, err := tun.CreateTUN("utun", device.DefaultMTU)
 	if err != nil {
-		fmt.Printf("failed to create TUN device: %v", err)
 		fmt.Errorf("Failed to create TUN device: %v", err)
 		os.Exit(ExitSetupFailed)
 	}
