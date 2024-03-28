@@ -24,10 +24,11 @@ The `wireguard` kernel module is not enabled in podman machines out of the box. 
 
 ```bash
 # Install via Homebrew
-$ brew install jasonmadigan/tap/podman-mac-net-connect
+brew install jasonmadigan/tap/podman-mac-net-connect
 
 # Run the service and register it to launch at boot
-$ sudo brew services start jasonmadigan/tap/podman-mac-net-connect
+# Note: running with sudo is important
+sudo brew services start jasonmadigan/tap/podman-mac-net-connect
 ```
 
 ### `GOPROXY` support
