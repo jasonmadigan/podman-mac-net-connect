@@ -19,7 +19,7 @@ const (
 )
 
 func main() {
-	interfaceName := "mad0"
+	interfaceName := "madawg0"
 
 	serverPortString := os.Getenv("SERVER_PORT")
 	if serverPortString == "" {

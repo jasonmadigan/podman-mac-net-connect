@@ -56,8 +56,8 @@ type ServiceDestination struct {
 	Identity string `toml:"identity"`
 }
 
-// findPodmanProcesses searches for Podman-related processes and attempts to parse
-// the SSH URI and identity file from the process's command line arguments.
+// searches for Podman-related processes and attempts to parse
+// the SSH URI and identity file from the process's arguments
 func findPodmanProcesses() (string, string, error) {
 	cmd := exec.Command("ps", "aux")
 	output, err := cmd.Output()
@@ -99,7 +99,7 @@ type SSHConnectionDetails struct {
 	Identity string
 }
 
-// loadWireGuardModule attempts to load the WireGuard module using modprobe.
+// loadWireGuardModule attempts to load the WireGuard module using modprobe
 func loadWireGuardModule(details *SSHConnectionDetails) error {
 	// Parse the URI to extract username and host.
 	uri, err := url.Parse(details.URI)
@@ -152,8 +152,6 @@ func main() {
 
 	fmt.Printf("SSH URI: %s, Identity File: %s\n", sshDetails.URI, sshDetails.Identity)
 
-	// Proceed with WireGuard module loading and further setup
-	// Note: The owner parameter has been removed from the function call
 	if err := loadWireGuardModule(&sshDetails); err != nil {
 		fmt.Printf("Error loading WireGuard module: %v\n", err)
 		os.Exit(ExitSetupFailed)
@@ -224,9 +222,8 @@ func main() {
 	logger.Verbosef("UAPI listener started")
 
 	// Wireguard configuration
-
-	hostPeerIp := "10.33.33.1"
-	vmPeerIp := "10.33.33.2"
+	hostPeerIp := "10.33.34.1"
+	vmPeerIp := "10.33.34.2"
 
 	c, err := wgctrl.New()
 	if err != nil {
@@ -268,7 +265,7 @@ func main() {
 		},
 	}
 
-	port := 3333
+	port := 3334
 	err = c.ConfigureDevice(interfaceName, wgtypes.Config{
 		ListenPort: &port,
 		PrivateKey: &hostPrivateKey,
