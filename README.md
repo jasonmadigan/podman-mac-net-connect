@@ -1,6 +1,6 @@
 # Podman Mac Net Connect
 
-> **Note:** This currently only works with Podman Engine 4.9.x. Support for Podman Engine 5.x is [coming soon](https://github.com/jasonmadigan/podman-mac-net-connect/issues/2).
+> **Note:** Tested with Podman Engine 4.9.1 & v5.0.3.
 
 > **Note:** This project is a fork of [chipmk/docker-mac-net-connect](https://github.com/chipmk/docker-mac-net-connect) for Docker, an excellent tool that inspired this version for Podman.
 
