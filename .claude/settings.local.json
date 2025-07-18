@@ -40,7 +40,15 @@
       "Bash(launchctl:*)",
       "Bash(sudo launchctl:*)",
       "Bash(cat:*)",
-      "Bash(sudo:*)"
+      "Bash(sudo:*)",
+      "Bash(git -C /Users/jasonmadigan/Work/homebrew-tap commit -m \"Update podman-mac-net-connect to 0.1.1\n\nMove from Quay.io to GitHub Container Registry with automated builds\")",
+      "Bash(git push:*)",
+      "Bash(gh release create:*)",
+      "Bash(brew:*)",
+      "Bash(brew upgrade:*)",
+      "Bash(git -C /Users/jasonmadigan/Work/homebrew-tap commit -m \"Fix SHA256 for v0.1.1\")",
+      "Bash(/opt/homebrew/opt/podman-mac-net-connect/bin/podman-mac-net-connect --version)",
+      "Bash(git -C /Users/jasonmadigan/Work/homebrew-tap commit -m \"Fix homebrew install to only install binary\n\nFix bin.install to only install the binary instead of all files\")"
     ],
     "deny": []
   }

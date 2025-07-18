@@ -2,5 +2,5 @@ package version
 
 // Variables initialized by the Go linker at build time - see Makefile
 
-var Version = "0.1.1"
+var Version = "0.1.2"
 var SetupImage = "ghcr.io/jasonmadigan/podman-mac-net-connect"

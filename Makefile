@@ -1,6 +1,6 @@
 PROJECT         := github.com/jasonmadigan/podman-mac-net-connect
 SETUP_IMAGE     := ghcr.io/jasonmadigan/podman-mac-net-connect
-VERSION         := 0.1.1
+VERSION         := 0.1.2
 LD_FLAGS        := -X ${PROJECT}/version.Version=${VERSION}
 
 run:: build-podman run-go
