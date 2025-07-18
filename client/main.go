@@ -84,21 +84,28 @@ func main() {
 	err = netlink.LinkAdd(wireguard)
 	if err != nil {
 		fmt.Printf("Could not add link %s: %v\n", linkAttrs.Name, err)
+		os.Exit(ExitSetupFailed)
 	}
 
 	vmIpNet, err := netlink.ParseIPNet(vmPeerIp + "/32")
 	if err != nil {
 		fmt.Printf("Could not parse VM peer IPNet: %v\n", err)
+		os.Exit(ExitSetupFailed)
 	}
 	hostIpNet, err := netlink.ParseIPNet(hostPeerIp + "/32")
 	if err != nil {
 		fmt.Printf("Could not parse host peer IPNet: %v\n", err)
+		os.Exit(ExitSetupFailed)
 	}
 
 	fmt.Println("Assigning IP to WireGuard interface")
 
 	addr := netlink.Addr{IPNet: vmIpNet, Peer: hostIpNet}
-	netlink.AddrAdd(wireguard, &addr)
+	err = netlink.AddrAdd(wireguard, &addr)
+	if err != nil {
+		fmt.Printf("Could not add address to interface: %v\n", err)
+		os.Exit(ExitSetupFailed)
+	}
 
 	c, err := wgctrl.New()
 	if err != nil {
@@ -156,9 +163,6 @@ func main() {
 	})
 	if err != nil {
 		fmt.Printf("Failed to configure wireguard device: %v\n", err)
-		fmt.Printf("%v", interfaceName)
-		fmt.Printf("%v", ips[0])
-		fmt.Printf("done.")
 		os.Exit(ExitSetupFailed)
 	}
 
