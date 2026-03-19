@@ -1,6 +1,6 @@
 module github.com/jasonmadigan/podman-mac-net-connect/client
 
-go 1.23.0
+go 1.24.0
 
 require (
 	github.com/coreos/go-iptables v0.6.0
@@ -15,8 +15,8 @@ require (
 	github.com/mdlayher/netlink v1.4.1 // indirect
 	github.com/mdlayher/socket v0.0.0-20211102153432-57e3fa563ecb // indirect
 	github.com/vishvananda/netns v0.0.0-20200728191858-db3c7e526aae // indirect
-	golang.org/x/crypto v0.36.0 // indirect
-	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/sys v0.31.0 // indirect
+	golang.org/x/crypto v0.45.0 // indirect
+	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/sys v0.38.0 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20211109020618-685490f568cf // indirect
 )
