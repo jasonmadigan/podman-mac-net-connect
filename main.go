@@ -4,11 +4,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -25,172 +24,134 @@ import (
 	"github.com/jasonmadigan/podman-mac-net-connect/networkmanager"
 	"github.com/jasonmadigan/podman-mac-net-connect/version"
 
-	"github.com/containers/podman/v4/pkg/bindings"
-	"github.com/containers/podman/v4/pkg/bindings/containers"
-	"github.com/containers/podman/v4/pkg/bindings/images"
-	"github.com/containers/podman/v4/pkg/bindings/network"
-	"github.com/containers/podman/v4/pkg/bindings/system"
-	"github.com/containers/podman/v4/pkg/domain/entities"
-	"github.com/containers/podman/v4/pkg/specgen"
+	"go.podman.io/common/pkg/config"
+
+	"github.com/containers/podman/v6/pkg/bindings"
+	"github.com/containers/podman/v6/pkg/bindings/network"
+	"github.com/containers/podman/v6/pkg/bindings/system"
+	"github.com/containers/podman/v6/pkg/domain/entities/types"
+	"github.com/containers/podman/v6/pkg/machine"
+	"github.com/containers/podman/v6/pkg/machine/define"
+	"github.com/containers/podman/v6/pkg/machine/shim"
+	"github.com/containers/podman/v6/pkg/machine/vmconfigs"
 )
 
-const (
-	ExitSetupSuccess = 0
-	ExitSetupFailed  = 1
-)
+const maxSetupRetries = 5
 
-// getPodmanConnection gets the Podman connection details using the official podman system connection command
-func getPodmanConnection() (string, string, error) {
-	// Get the list of system connections in JSON format
-	cmd := exec.Command("podman", "system", "connection", "list", "--format", "json")
-	output, err := cmd.Output()
+const ExitSetupFailed = 1
+
+// getMachineSSHConfig gets SSH config for the default podman machine and
+// returns the SSH config and the stored API connection details.
+func getMachineSSHConfig() (*vmconfigs.SSHConfig, string, string, error) {
+	mc, _, err := shim.VMExists(define.DefaultMachineName)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to list podman connections: %w", err)
+		return nil, "", "", fmt.Errorf("failed to find podman machine %q: %w", define.DefaultMachineName, err)
 	}
 
-	// Parse the JSON response
-	var connections []PodmanSystemConnection
-	if err := json.Unmarshal(output, &connections); err != nil {
-		return "", "", fmt.Errorf("failed to parse podman connections: %w", err)
+	// look up the rootful API connection registered by podman machine init
+	cfg, err := config.New(nil)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to load podman config: %w", err)
 	}
 
-	if len(connections) == 0 {
-		return "", "", fmt.Errorf("no podman connections found")
+	conn, err := cfg.GetConnection(define.DefaultMachineName+"-root", false)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("failed to get root connection for %q: %w", define.DefaultMachineName, err)
 	}
 
-	// Prefer root connection for privileged operations, fallback to default
-	var selectedConnection *PodmanSystemConnection
-	for _, conn := range connections {
-		// Look for a root connection (contains 'root' in URI)
-		if strings.Contains(conn.URI, "root@") {
-			selectedConnection = &conn
-			break
+	return &mc.SSH, conn.URI, conn.Identity, nil
+}
+
+// vmSSH wraps the machine SSH calls to avoid repeating config everywhere.
+type vmSSH struct {
+	config *vmconfigs.SSHConfig
+}
+
+func (v *vmSSH) run(args ...string) error {
+	return machine.LocalhostSSH("root", v.config.IdentityPath, define.DefaultMachineName, v.config.Port, args)
+}
+
+func (v *vmSSH) runWithStdin(stdin io.Reader, args ...string) error {
+	return machine.LocalhostSSHWithStdin("root", v.config.IdentityPath, define.DefaultMachineName, v.config.Port, args, stdin)
+}
+
+func loadWireGuardModule(ssh *vmSSH) error {
+	if err := ssh.run("modprobe", "wireguard"); err != nil {
+		return fmt.Errorf("loading wireguard module: %w", err)
+	}
+	return nil
+}
+
+const wgInterface = "maddawg0"
+
+func setupPodmanVm(
+	ssh *vmSSH,
+	serverPort int,
+	hostPeerIp string,
+	vmPeerIp string,
+	hostPrivateKey wgtypes.Key,
+	vmPrivateKey wgtypes.Key,
+) error {
+	// clean up any existing interface
+	ssh.run("ip", "link", "del", wgInterface)
+
+	if err := ssh.run("ip", "link", "add", wgInterface, "type", "wireguard"); err != nil {
+		return fmt.Errorf("creating wireguard interface: %w", err)
+	}
+
+	if err := ssh.run("ip", "addr", "add", vmPeerIp+"/32", "peer", hostPeerIp+"/32", "dev", wgInterface); err != nil {
+		return fmt.Errorf("assigning interface address: %w", err)
+	}
+
+	// pipe private key via stdin so it doesn't appear in process list.
+	// endpoint uses host.containers.internal which podman sets up in the VM.
+	endpoint := fmt.Sprintf("host.containers.internal:%d", serverPort)
+	err := ssh.runWithStdin(
+		strings.NewReader(vmPrivateKey.String()),
+		"wg", "set", wgInterface,
+		"private-key", "/dev/stdin",
+		"peer", hostPrivateKey.PublicKey().String(),
+		"endpoint", endpoint,
+		"allowed-ips", "0.0.0.0/0,"+hostPeerIp+"/32",
+		"persistent-keepalive", "5",
+	)
+	if err != nil {
+		return fmt.Errorf("configuring wireguard peer: %w", err)
+	}
+
+	if err := ssh.run("ip", "link", "set", wgInterface, "up"); err != nil {
+		return fmt.Errorf("bringing up interface: %w", err)
+	}
+
+	// add NAT rule if not already present
+	if err := ssh.run("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", hostPeerIp, "-j", "MASQUERADE"); err != nil {
+		if err := ssh.run("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", hostPeerIp, "-j", "MASQUERADE"); err != nil {
+			return fmt.Errorf("adding NAT rule: %w", err)
 		}
 	}
 
-	// If no root connection found, use the default connection
-	if selectedConnection == nil {
-		for _, conn := range connections {
-			if conn.Default {
-				selectedConnection = &conn
-				break
-			}
-		}
-	}
-
-	// If still no connection found, use the first one
-	if selectedConnection == nil {
-		selectedConnection = &connections[0]
-	}
-
-	fmt.Printf("Selected Podman connection: %s (%s)\n", selectedConnection.Name, selectedConnection.URI)
-	return selectedConnection.URI, selectedConnection.Identity, nil
-}
-
-// PodmanConnectionDetails holds the connection URI and identity file path for Podman API access.
-type PodmanConnectionDetails struct {
-	URI      string
-	Identity string
-}
-
-// PodmanSystemConnection represents a connection from 'podman system connection list'
-type PodmanSystemConnection struct {
-	Name      string `json:"Name"`
-	URI       string `json:"URI"`
-	Identity  string `json:"Identity"`
-	IsMachine bool   `json:"IsMachine"`
-	Default   bool   `json:"Default"`
-}
-
-// loadWireGuardModule attempts to load the WireGuard module using a privileged container
-func loadWireGuardModule(podmanCli context.Context) error {
-	// Use a minimal alpine image to run modprobe
-	imageName := "alpine:latest"
-
-	// Check if the image exists locally, pull if not
-	_, err := images.GetImage(podmanCli, imageName, &images.GetOptions{})
-	if err != nil {
-		fmt.Printf("Image (%v) doesn't exist locally. Pulling...\n", imageName)
-		_, err := images.Pull(podmanCli, imageName, &images.PullOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to pull alpine image: %w", err)
-		}
-	}
-
-	// Clean up any existing container with the same name
-	containerName := "wireguard-module-loader"
-	cleanupContainer(podmanCli, containerName) // Ignore errors - container might not exist
-
-	// Create a privileged container to load the WireGuard module
-	resp, err := containers.CreateWithSpec(podmanCli, &specgen.SpecGenerator{
-		ContainerBasicConfig: specgen.ContainerBasicConfig{
-			Name:         containerName,
-			RawImageName: imageName,
-			Remove:       true,
-			Command:      []string{"modprobe", "wireguard"},
-		},
-		ContainerSecurityConfig: specgen.ContainerSecurityConfig{
-			CapAdd: []string{"NET_ADMIN", "SYS_MODULE"},
-		},
-		ContainerStorageConfig: specgen.ContainerStorageConfig{
-			Image: imageName,
-		},
-		ContainerNetworkConfig: specgen.ContainerNetworkConfig{
-			NetNS: specgen.Namespace{
-				NSMode: specgen.Host,
-			},
-		},
-	}, &containers.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create wireguard module loader container: %w", err)
-	}
-
-	// Start the container
-	err = containers.Start(podmanCli, resp.ID, &containers.StartOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to start wireguard module loader container: %w", err)
-	}
-
-	// Wait for the container to complete
-	_, err = containers.Wait(podmanCli, resp.ID, &containers.WaitOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to wait for wireguard module loader container: %w", err)
-	}
-
-	fmt.Println("WireGuard module loaded successfully via container.")
 	return nil
 }
 
 func main() {
-	uri, identity, err := getPodmanConnection()
+	sshConfig, uri, identity, err := getMachineSSHConfig()
 	if err != nil {
 		fmt.Println("Error:", err)
-		return
-	}
-
-	fmt.Println("Found Podman connection")
-	fmt.Println("URI:", uri)
-	fmt.Println("Identity file:", identity)
-
-	connectionDetails := PodmanConnectionDetails{
-		URI:      uri,
-		Identity: identity,
-	}
-
-	fmt.Printf("Connection URI: %s, Identity File: %s\n", connectionDetails.URI, connectionDetails.Identity)
-
-	// Create Podman connection early so we can use it for module loading
-	fmt.Printf("Creating Podman connection with URI: %s and Identity: %s\n", connectionDetails.URI, connectionDetails.Identity)
-	podmanCtx, err := bindings.NewConnectionWithIdentity(context.Background(), connectionDetails.URI, connectionDetails.Identity, false)
-	if err != nil {
-		fmt.Printf("Error creating Podman connection with identity: %v\n", err)
 		os.Exit(ExitSetupFailed)
 	}
-	fmt.Println("Successfully created Podman connection with identity.")
 
-	// Load WireGuard module using privileged container
-	if err := loadWireGuardModule(podmanCtx); err != nil {
+	ssh := &vmSSH{config: sshConfig}
+
+	fmt.Printf("Found podman machine (SSH port: %d)\n", sshConfig.Port)
+
+	if err := loadWireGuardModule(ssh); err != nil {
 		fmt.Printf("Error loading WireGuard module: %v\n", err)
+		os.Exit(ExitSetupFailed)
+	}
+
+	podmanCtx, err := bindings.NewConnectionWithIdentity(context.Background(), uri, identity, false)
+	if err != nil {
+		fmt.Printf("Error creating Podman API connection: %v\n", err)
 		os.Exit(ExitSetupFailed)
 	}
 
@@ -258,9 +219,8 @@ func main() {
 
 	logger.Verbosef("UAPI listener started")
 
-	// Wireguard configuration
-	hostPeerIp := "10.33.34.1"
-	vmPeerIp := "10.33.34.2"
+	hostPeerIp := getEnvOrDefault("PMNET_HOST_IP", "10.33.34.1")
+	vmPeerIp := getEnvOrDefault("PMNET_VM_IP", "10.33.34.2")
 
 	c, err := wgctrl.New()
 	if err != nil {
@@ -302,7 +262,7 @@ func main() {
 		},
 	}
 
-	port := 3334
+	port := getEnvOrDefaultInt("PMNET_WG_PORT", 3334)
 	err = c.ConfigureDevice(interfaceName, wgtypes.Config{
 		ListenPort: &port,
 		PrivateKey: &hostPrivateKey,
@@ -315,9 +275,8 @@ func main() {
 
 	networkManager := networkmanager.New()
 
-	_, stderr, err := networkManager.SetInterfaceAddress(hostPeerIp, vmPeerIp, interfaceName)
-	if err != nil {
-		logger.Errorf("Failed to set interface address with ifconfig: %v. %v", err, stderr)
+	if err := networkmanager.SetInterfaceAddress(interfaceName, hostPeerIp, vmPeerIp); err != nil {
+		logger.Errorf("Failed to set interface address: %v", err)
 		os.Exit(ExitSetupFailed)
 	}
 
@@ -328,9 +287,9 @@ func main() {
 	backgroundCtx, cancelBackground := context.WithCancel(podmanCtx)
 	defer cancelBackground()
 
-	// Set up VM once at startup
 	go func() {
-		for {
+		delay := 2 * time.Second
+		for attempt := 1; attempt <= maxSetupRetries; attempt++ {
 			select {
 			case <-backgroundCtx.Done():
 				logger.Verbosef("VM setup cancelled")
@@ -338,18 +297,20 @@ func main() {
 			default:
 			}
 
-			err = setupPodmanVm(backgroundCtx, port, hostPeerIp, vmPeerIp, hostPrivateKey, vmPrivateKey)
-			if err != nil {
-				logger.Errorf("Failed to setup VM: %v", err)
-				time.Sleep(5 * time.Second)
-				continue
+			err = setupPodmanVm(ssh, port, hostPeerIp, vmPeerIp, hostPrivateKey, vmPrivateKey)
+			if err == nil {
+				logger.Verbosef("VM setup completed successfully")
+				monitorNetworkEvents(backgroundCtx, &networkManager, interfaceName, logger)
+				return
 			}
-			logger.Verbosef("VM setup completed successfully")
-			break // VM setup successful, exit the loop
-		}
 
-		// Start event-driven network monitoring
-		monitorNetworkEvents(backgroundCtx, &networkManager, interfaceName, logger)
+			logger.Errorf("Failed to setup VM (attempt %d/%d): %v", attempt, maxSetupRetries, err)
+			if attempt < maxSetupRetries {
+				time.Sleep(delay)
+				delay *= 2
+			}
+		}
+		logger.Errorf("VM setup failed after %d attempts, giving up", maxSetupRetries)
 	}()
 
 	// Wait for program to terminate
@@ -370,75 +331,9 @@ func main() {
 	cancelBackground()
 
 	// Comprehensive cleanup
-	performCleanup(podmanCtx, &networkManager, interfaceName, logger, uapi, device)
+	performCleanup(&networkManager, logger, uapi, device)
 
 	logger.Verbosef("Shutdown complete")
-}
-
-func setupPodmanVm(
-	podmanCli context.Context,
-	serverPort int,
-	hostPeerIp string,
-	vmPeerIp string,
-	hostPrivateKey wgtypes.Key,
-	vmPrivateKey wgtypes.Key,
-) error {
-
-	imageName := fmt.Sprintf("%s:%s", version.SetupImage, version.Version)
-
-	_, err := images.GetImage(podmanCli, imageName, &images.GetOptions{})
-	if err != nil {
-		fmt.Printf("Image (%v) doesn't exist locally. Pulling...\n", imageName)
-
-		_, err := images.Pull(podmanCli, imageName, &images.PullOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to pull setup image: %w", err)
-		}
-	}
-
-	// Clean up any existing container with the same name
-	containerName := "wireguard-setup"
-	cleanupContainer(podmanCli, containerName) // Ignore errors - container might not exist
-
-	resp, err := containers.CreateWithSpec(podmanCli, &specgen.SpecGenerator{
-		ContainerBasicConfig: specgen.ContainerBasicConfig{
-			Name:         containerName,
-			RawImageName: imageName,
-			Remove:       true,
-			Env: map[string]string{
-				"SERVER_PORT":     strconv.Itoa(serverPort),
-				"HOST_PEER_IP":    hostPeerIp,
-				"VM_PEER_IP":      vmPeerIp,
-				"HOST_PUBLIC_KEY": hostPrivateKey.PublicKey().String(),
-				"VM_PRIVATE_KEY":  vmPrivateKey.String(),
-			},
-			Command: []string{"./app"},
-		},
-		ContainerSecurityConfig: specgen.ContainerSecurityConfig{
-			CapAdd: []string{"NET_ADMIN"},
-		},
-		ContainerStorageConfig: specgen.ContainerStorageConfig{
-			Image: imageName,
-		},
-		ContainerNetworkConfig: specgen.ContainerNetworkConfig{
-			NetNS: specgen.Namespace{
-				NSMode: specgen.Host,
-			},
-		},
-	}, &containers.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create container: %w", err)
-	}
-
-	// Run container to completion
-	err = containers.Start(podmanCli, resp.ID, &containers.StartOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to start container: %w", err)
-	}
-
-	fmt.Println("Setup container complete")
-
-	return nil
 }
 
 // monitorNetworkEvents monitors Podman events for network changes and updates routes accordingly
@@ -459,7 +354,7 @@ func monitorNetworkEvents(ctx context.Context, networkManager *networkmanager.Ne
 	}
 
 	// Set up event monitoring for network changes
-	eventChan := make(chan entities.Event)
+	eventChan := make(chan types.Event)
 	cancelChan := make(chan bool)
 
 	// Configure event filtering for network events
@@ -494,23 +389,15 @@ func monitorNetworkEvents(ctx context.Context, networkManager *networkmanager.Ne
 
 			switch event.Action {
 			case "create":
-				// Get the specific network that was created
 				networkName := event.Actor.Attributes["name"]
 				if networkName != "" {
-					networks, err := network.List(monitorCtx, &network.ListOptions{})
+					report, err := network.Inspect(monitorCtx, networkName, &network.InspectOptions{})
 					if err != nil {
-						logger.Errorf("Failed to list networks after create event: %v", err)
+						logger.Errorf("Failed to inspect network %s: %v", networkName, err)
 						continue
 					}
-
-					// Find the newly created network
-					for _, net := range networks {
-						if net.Name == networkName {
-							logger.Verbosef("Processing new network: %s", net.Name)
-							networkManager.ProcessPodmanNetworkCreate(net, interfaceName)
-							break
-						}
-					}
+					logger.Verbosef("Processing new network: %s", networkName)
+					networkManager.ProcessPodmanNetworkCreate(report.Network, interfaceName)
 				}
 			case "remove":
 				// Handle network removal (route cleanup)
@@ -524,60 +411,31 @@ func monitorNetworkEvents(ctx context.Context, networkManager *networkmanager.Ne
 	}
 }
 
-// cleanupContainer removes a container by name, ignoring errors if it doesn't exist
-func cleanupContainer(ctx context.Context, name string) error {
-	force := true
-	ignore := true
-	_, err := containers.Remove(ctx, name, &containers.RemoveOptions{
-		Force:  &force,
-		Ignore: &ignore,
-	})
-	return err
-}
+func performCleanup(networkManager *networkmanager.NetworkManager, logger *device.Logger, uapi net.Listener, wgDevice *device.Device) {
+	logger.Verbosef("Starting cleanup...")
 
-// performCleanup handles graceful shutdown and cleanup of all resources
-func performCleanup(podmanCtx context.Context, networkManager *networkmanager.NetworkManager, interfaceName string, logger *device.Logger, uapi net.Listener, device *device.Device) {
-	logger.Verbosef("Starting cleanup process...")
+	networkManager.CleanupRoutes()
 
-	// Create a timeout context for cleanup operations
-	cleanupCtx, cancel := context.WithTimeout(podmanCtx, 10*time.Second)
-	defer cancel()
-
-	// 1. Clean up network routes
-	logger.Verbosef("Cleaning up network routes...")
-	for _, network := range networkManager.PodmanNetworks {
-		for _, subnet := range network.Subnets {
-			if network.Driver == "bridge" {
-				logger.Verbosef("Removing route for %s (%s)", subnet.Subnet, network.Name)
-				_, stderr, err := networkManager.DeleteRoute(subnet.Subnet.String())
-				if err != nil {
-					logger.Errorf("Failed to remove route %s: %v. %v", subnet.Subnet, err, stderr)
-				}
-			}
-		}
-	}
-
-	// 2. Clean up any running containers we created
-	logger.Verbosef("Cleaning up containers...")
-	containerNames := []string{"wireguard-module-loader", "wireguard-setup"}
-	for _, containerName := range containerNames {
-		if err := cleanupContainer(cleanupCtx, containerName); err != nil {
-			logger.Errorf("Failed to remove container %s: %v", containerName, err)
-		}
-	}
-
-	// 3. Close WireGuard resources
-	logger.Verbosef("Closing WireGuard resources...")
 	if uapi != nil {
 		uapi.Close()
 	}
-	if device != nil {
-		device.Close()
+	if wgDevice != nil {
+		wgDevice.Close()
 	}
+}
 
-	// 4. The WireGuard interface (utun) should be automatically cleaned up
-	// when the device is closed, but we log for visibility
-	logger.Verbosef("WireGuard interface %s should be automatically cleaned up", interfaceName)
+func getEnvOrDefault(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
+}
 
-	logger.Verbosef("Cleanup completed successfully")
+func getEnvOrDefaultInt(key string, defaultVal int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
+		}
+	}
+	return defaultVal
 }

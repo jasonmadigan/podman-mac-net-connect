@@ -1,6 +1,6 @@
 # Podman Mac Net Connect
 
-> **Note:** Tested with Podman Engine 4.9.1 & v5.0.3.
+> **Note:** Requires Podman v5.0.0 or higher. Uses Podman v6 machine API.
 
 > **Note:** This project is a fork of [chipmk/docker-mac-net-connect](https://github.com/chipmk/docker-mac-net-connect) for Docker, an excellent tool that inspired this version for Podman.
 
@@ -11,16 +11,25 @@
 - **L3 connectivity:** Connect to podman containers from macOS host (without port binding).
 - **Lightweight:** Based on WireGuard (built-in to Linux kernel).
 - **Hands-off:** Install once and forget. No need to re-configure every time you restart your Mac or podman machines.
-- **Automatic:** Docker networks are automatically added/removed from macOS routing table.
+- **Automatic:** Podman networks are automatically added/removed from macOS routing table.
 - **No bloat:** Everything is handled by a single binary. No external dependencies/tools are needed.
 
 ## Requirements
 
-You must be using podman for macOS v5.0.0 or higher to use this tool.
+Podman for macOS v5.0.0 or higher.
 
 ## Notes
 
-The `wireguard` kernel module is not enabled in podman machines out of the box. Running this service will see it check for the existence of this module and, if necessary, enable it via via a podman system connection as root. This likely only works on `--rootful` podman machines for the time being.
+The `wireguard` kernel module is not enabled in podman machines out of the box. Running this service will load it via SSH as root. This likely only works on `--rootful` podman machines for the time being.
+
+## Configuration
+
+| Variable | Default | Description |
+|-|-|-|
+| `PMNET_HOST_IP` | `10.33.34.1` | WireGuard peer IP on the macOS side |
+| `PMNET_VM_IP` | `10.33.34.2` | WireGuard peer IP on the VM side |
+| `PMNET_WG_PORT` | `3334` | WireGuard listen port |
+| `LOG_LEVEL` | `verbose` | Log level (`verbose`, `error`, `silent`) |
 
 ## Installation
 
@@ -82,12 +91,6 @@ Accept-Ranges: bytes
 
 ## Development
 
-To run locally, build the client image:
-
-```bash
-make build-podman
-```
-
 Run (as root):
 
 ```bash
@@ -100,7 +103,7 @@ Accessing containers directly by IP (instead of port binding) can be useful and 
 
 ### Problem
 
-Podman on macOS does not expose container networks directly on the macOS host. Podman on macOS works by running a Linux VM under the hood (using [`qemu`](https://www.qemu.org/)) and creates containers within that VM.
+Podman on macOS does not expose container networks directly on the macOS host. Podman on macOS works by running a Linux VM under the hood (using AppleHV or QEMU) and creates containers within that VM.
 
 Podman on macOS supports connecting to containers over Layer 4 (port binding), but not Layer 3 (by IP address).
 
@@ -118,19 +121,17 @@ WireGuard is an extremely lightweight and fast VPN. It’s also built in to the 
 
 ### macOS side
 
-A lightweight customized WireGuard server (_`podman-mac-net-connect`_) runs on your macOS host and creates a virtual network interface (`utun`) that acts as the link between your Mac and the Docker Desktop Linux VM.
+A lightweight WireGuard server (_`podman-mac-net-connect`_) runs on your macOS host and creates a virtual network interface (`utun`) that acts as the link between your Mac and the Podman Linux VM.
 
 ### Linux VM side
 
 Since WireGuard is built into the Linux kernel, all we need to do is configure the VM with a virtual network interface that links to the macOS host. No background processes or containers are required.
 
-How do we configure the VM? A one-time container is deployed with just enough privileges to configure the Linux host’s network interfaces (`—-cap-add=NET_ADMIN` + `-—net=host`).
-
-The container creates the interface, configures WireGuard, then exits and is destroyed. The WireGuard interface continues working after the container is gone because it was created on the Linux host’s network namespace, not the container’s.
+The server connects to the Podman machine via SSH (using the machine’s built-in SSH config) and runs the necessary commands to create and configure the WireGuard interface directly. The interface persists after the SSH session ends because it was created on the Linux host’s network namespace.
 
 ### Tying it together
 
-The server on macOS monitors your podman container networks and automatically adds their subnets to your macOS routing table (routing through the `utun` interface). Now you can connect to any container directly by it’s IP address from your macOS host. Eg.
+The server on macOS monitors your podman container networks and automatically adds their subnets to your macOS routing table (routing through the `utun` interface). Now you can connect to any container directly by its IP address from your macOS host. E.g.
 
 ```bash
 # Run an nginx container
@@ -173,7 +174,7 @@ Other great solutions have been created to solve this, but none of them are as t
 
 ### Is this secure?
 
-This tool piggybacks off of WireGuard which has gone through numerous audits and security tests (it is built-in to the Linux kernel after all). The `docker-mac-net-connect` server generates new private/public key pairs for each WireGuard peer every time it runs. No values are hard-coded.
+This tool piggybacks off of WireGuard which has gone through numerous audits and security tests (it is built-in to the Linux kernel after all). The server generates new private/public key pairs for each WireGuard peer every time it runs. No values are hard-coded.
 
 Network traffic runs directly between the macOS host and local Linux VM - no external connections are made.
 
@@ -195,7 +196,7 @@ For example, let's create a Podman network with subnet `172.200.0.0/16`:
 # First validate that no route exists for the subnet
 sudo netstat -rnf inet | grep 172.200
 
-# Create the docker network
+# Create the podman network
 podman network create --subnet 172.200.0.0/16 my-network
 
 # Check the routing table - a new route exists
