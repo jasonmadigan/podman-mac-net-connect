@@ -43,6 +43,9 @@ Some users require changing `GOPROXY` due to firewalls. This formulae adds speci
 HOMEBREW_GOPROXY=https://my-proxy-url brew install jasonmadigan/tap/podman-mac-net-connect
 ```
 
+> [!TIP]
+> To uninstall this tool, see the [Uninstallation](#uninstallation) section below.
+
 ## Usage
 
 After installing, you will be able to do this:
@@ -168,6 +171,32 @@ Other great solutions have been created to solve this, but none of them are as t
   - Requires installing an OpenVPN client (ie. `Tunnelblick`)
   - Requires an OpenVPN server container to be running at all times in order to function
   - Docker network subnets have to be routed manually
+
+## Uninstallation
+
+To completely remove the service and its configuration, follow these steps:
+
+1. **Stop the service** (this will also unload the LaunchDaemon):
+   ```bash
+   sudo brew services stop jasonmadigan/tap/podman-mac-net-connect
+   ```
+
+2. **Uninstall the formula**:
+   ```bash
+   brew uninstall jasonmadigan/tap/podman-mac-net-connect
+   ```
+
+3. **Remove the TAP** (optional):
+   ```bash
+   brew untap jasonmadigan/tap
+   ```
+
+4. **Verify cleanup**:
+   If the uninstallation fails due to permission errors, you can manually remove any leftover files:
+   ```bash
+   sudo rm -rf /opt/homebrew/var/log/podman-mac-net-connect/
+   sudo rm -f /Library/LaunchDaemons/homebrew.mxcl.podman-mac-net-connect.plist
+   ```
 
 ## FAQ
 
